@@ -1,0 +1,8 @@
+uvicorn
+fastapi[standard]
+snowflake-snowpark-python
+pandas
+google-genai
+dotenv
+sqlalchemy
+snowflake-sqlalchemy
