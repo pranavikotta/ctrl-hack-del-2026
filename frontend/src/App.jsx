@@ -381,6 +381,51 @@ function App() {
     }
   };
 
+  const handleScheduleSave = async () => {
+    // Convert editingSchedule to schedule string
+    const enabledDays = Object.entries(editingSchedule)
+      .filter(([_, data]) => data.enabled)
+      .map(([day, data]) => `${day} ${data.time}`)
+      .join(', ');
+    
+    const workoutsPerWeek = Object.values(editingSchedule).filter(d => d.enabled).length;
+    
+    try {
+      setIsLoading(true);
+      const response = await fetch('http://127.0.0.1:8000/update_schedule', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          user_id: userProfile.user_id,
+          schedule: enabledDays,
+          workouts_per_week: workoutsPerWeek
+        }),
+      });
+
+      const data = await response.json();
+      
+      if (data.status === 'success') {
+        // Update local state
+        setUserProfile({
+          ...userProfile,
+          ai_extracted_data: {
+            ...userProfile.ai_extracted_data,
+            schedule: enabledDays
+          },
+          workouts_per_week: workoutsPerWeek
+        });
+        setShowScheduleModal(false);
+      }
+    } catch (error) {
+      console.error("Error updating schedule:", error);
+      alert('Failed to update schedule');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   // --- RENDER: Goal Selection Screen ---
   if (currentPage === 'goal-selection') {
     return (
@@ -554,6 +599,246 @@ function App() {
           </div>
 
           <div className="dashboard-grid">
+            {/* Calendar Schedule - Apple Calendar Style */}
+            <div className="dashboard-card schedule-card">
+              <div className="card-title">Your Weekly Schedule</div>
+              <div className="calendar-container">
+                {/* Day Headers */}
+                <div className="calendar-header">
+                  <div className="time-column-header"></div>
+                  {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((day) => (
+                    <div 
+                      key={day} 
+                      className="day-header clickable"
+                      onClick={() => setShowScheduleModal(true)}
+                      title="Click to edit schedule"
+                    >
+                      {day}
+                    </div>
+                  ))}
+                </div>
+                
+                {/* Scrollable Time Grid */}
+                <div 
+                  className="calendar-body" 
+                  ref={calendarBodyRef}
+                  onScroll={(e) => setCalendarScroll(e.target.scrollTop)}
+                >
+                  {/* Time labels column */}
+                  <div className="time-column">
+                    {Array.from({ length: 24 }, (_, i) => {
+                      const hour = i;
+                      const displayHour = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+                      const period = hour < 12 ? 'AM' : 'PM';
+                      return (
+                        <div key={hour} className="time-label">
+                          {displayHour}:00 {period}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  
+                  {/* Days grid */}
+                  <div className="days-grid">
+                    {['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'].map((fullDay, dayIndex) => {
+                      const schedule = userProfile.ai_extracted_data?.schedule || '';
+                      const scheduleLower = schedule.toLowerCase();
+                      
+                      // Check if this specific day is mentioned in schedule
+                      const dayLower = fullDay.toLowerCase();
+                      const dayInSchedule = scheduleLower.includes(dayLower);
+                      
+                      // Determine workout time range for THIS SPECIFIC DAY
+                      let workoutStart = -1;
+                      let workoutEnd = -1;
+                      
+                      if (dayInSchedule) {
+                        // Extract the time for this specific day
+                        // Pattern: "monday morning" or "wednesday afternoon"
+                        const dayPattern = new RegExp(`${dayLower}\\s+(morning|afternoon|evening)`, 'i');
+                        const match = schedule.match(dayPattern);
+                        
+                        if (match) {
+                          const timeOfDay = match[1].toLowerCase();
+                          if (timeOfDay === 'morning') {
+                            workoutStart = 6;
+                            workoutEnd = 10;
+                          } else if (timeOfDay === 'afternoon') {
+                            workoutStart = 13;
+                            workoutEnd = 17;
+                          } else if (timeOfDay === 'evening') {
+                            workoutStart = 17;
+                            workoutEnd = 21;
+                          }
+                        } else {
+                          // Fallback: check for general time mentions
+                          if (scheduleLower.includes('morning')) {
+                            workoutStart = 6;
+                            workoutEnd = 10;
+                          } else if (scheduleLower.includes('afternoon')) {
+                            workoutStart = 13;
+                            workoutEnd = 17;
+                          } else if (scheduleLower.includes('evening')) {
+                            workoutStart = 17;
+                            workoutEnd = 21;
+                          } else {
+                            // Default to afternoon
+                            workoutStart = 13;
+                            workoutEnd = 17;
+                          }
+                        }
+                      }
+                      
+                      // Get current day info
+                      const today = new Date();
+                      const currentDayIndex = today.getDay();
+                      const adjustedCurrentDay = currentDayIndex === 0 ? 6 : currentDayIndex - 1;
+                      
+                      const isPast = dayIndex < adjustedCurrentDay;
+                      const isToday = dayIndex === adjustedCurrentDay;
+                      const isFuture = dayIndex > adjustedCurrentDay;
+                      
+                      // Find journal entry for this day
+                      const dayAbbrev = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][dayIndex];
+                      const journalEntry = journalHistory.find(entry => entry.day === dayAbbrev);
+                      const sentiment = journalEntry ? journalEntry.sentiment : null;
+                      
+                      // Determine block status
+                      let blockStatus = 'none';
+                      if (dayInSchedule && workoutStart !== -1) {
+                        if (isFuture) {
+                          blockStatus = 'upcoming';
+                        } else if (isPast || isToday) {
+                          if (sentiment !== null) {
+                            if (sentiment >= 0.7) blockStatus = 'completed-high';
+                            else if (sentiment >= 0.5) blockStatus = 'completed-moderate';
+                            else blockStatus = 'completed-low';
+                          } else {
+                            blockStatus = 'missed';
+                          }
+                        }
+                      }
+
+                      // Calculate sticky indicator visibility
+                      const HOUR_HEIGHT = 60;
+                      const CONTAINER_HEIGHT = 300; // calendar-body height
+                      const workoutStartPx = workoutStart * HOUR_HEIGHT;
+                      const workoutEndPx = workoutEnd * HOUR_HEIGHT;
+                      const viewportTop = calendarScroll;
+                      const viewportBottom = calendarScroll + CONTAINER_HEIGHT;
+
+                      // Check if workout is above or below viewport
+                      const isAboveViewport = workoutEndPx < viewportTop;
+                      const isBelowViewport = workoutStartPx > viewportBottom;
+                      const isPartiallyVisible = workoutStartPx < viewportTop && workoutEndPx > viewportTop;
+
+                      // Calculate indicator height when expanding into view
+                      let topIndicatorHeight = 24; // default height
+                      let bottomIndicatorHeight = 24;
+
+                      if (isPartiallyVisible) {
+                        // Expanding from top as we scroll down
+                        topIndicatorHeight = Math.min(workoutEndPx - viewportTop, workoutEndPx - workoutStartPx);
+                      }
+
+                      const isPartiallyVisibleBottom = workoutStartPx < viewportBottom && workoutEndPx > viewportBottom;
+                      if (isPartiallyVisibleBottom) {
+                        // Expanding from bottom as we scroll up
+                        bottomIndicatorHeight = Math.min(viewportBottom - workoutStartPx, workoutEndPx - workoutStartPx);
+                      }
+                      
+                      return (
+                        <div key={fullDay} className="day-column">
+                          {/* Top sticky indicator - shows when workout is above viewport */}
+                          {isAboveViewport && blockStatus !== 'none' && (
+                            <div 
+                              className={`sticky-indicator top ${blockStatus}`}
+                              style={{ height: '24px' }}
+                            />
+                          )}
+
+                          {/* Expanding top indicator - shows when scrolling into workout from below */}
+                          {isPartiallyVisible && blockStatus !== 'none' && (
+                            <div 
+                              className={`sticky-indicator top expanding ${blockStatus}`}
+                              style={{ height: `${topIndicatorHeight}px` }}
+                            />
+                          )}
+
+                          {Array.from({ length: 24 }, (_, hour) => {
+                            const hasWorkout = hour >= workoutStart && hour < workoutEnd;
+                            const isFirstBlock = hour === workoutStart;
+                            const isLastBlock = hour === workoutEnd - 1;
+                            const isMiddleBlock = hasWorkout && !isFirstBlock && !isLastBlock;
+                            
+                            return (
+                              <div
+                                key={`${fullDay}-${hour}`}
+                                className={`time-block ${hasWorkout ? 'workout-block' : ''} ${isFirstBlock ? 'first-block' : ''} ${isLastBlock ? 'last-block' : ''} ${isMiddleBlock ? 'middle-block' : ''}`}
+                              >
+                                {hasWorkout && (
+                                  <div className={`workout-pill ${blockStatus} ${isFirstBlock ? 'first' : ''} ${isLastBlock ? 'last' : ''} ${isMiddleBlock ? 'middle' : ''}`}>
+                                    {isFirstBlock && (
+                                      <>
+                                      </>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+
+                          {/* Bottom sticky indicator - shows when workout is below viewport */}
+                          {isBelowViewport && blockStatus !== 'none' && (
+                            <div 
+                              className={`sticky-indicator bottom ${blockStatus}`}
+                              style={{ height: '24px' }}
+                            />
+                          )}
+
+                          {/* Expanding bottom indicator - shows when scrolling into workout from above */}
+                          {isPartiallyVisibleBottom && blockStatus !== 'none' && (
+                            <div 
+                              className={`sticky-indicator bottom expanding ${blockStatus}`}
+                              style={{ height: `${bottomIndicatorHeight}px` }}
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+              
+              {/* Legend */}
+              <div className="calendar-legend">
+                <div className="legend-item">
+                  <div className="legend-box upcoming"></div>
+                  <span>Upcoming Workout</span>
+                </div>
+                <div className="legend-item">
+                  <div className="legend-box completed-high"></div>
+                  <span>Completed - High Recovery</span>
+                </div>
+                <div className="legend-item">
+                  <div className="legend-box completed-moderate"></div>
+                  <span>Completed - Moderate</span>
+                </div>
+                <div className="legend-item">
+                  <div className="legend-box completed-low"></div>
+                  <span>Completed - Low/Stressed</span>
+                </div>
+                <div className="legend-item">
+                  <div className="legend-box missed"></div>
+                  <span>No Journal Entry</span>
+                </div>
+              </div>
+              
+              <div className="schedule-note">
+                {userProfile.ai_extracted_data?.schedule || 'No schedule set'}
+              </div>
+            </div>
+
             <div className="dashboard-card">
               <div className="card-title">Your Goal</div>
               <div className="card-content">
@@ -970,6 +1255,64 @@ function App() {
               Start Over
             </button>
           </div>
+
+          {/* Schedule Editing Modal */}
+          {showScheduleModal && (
+            <div className="modal-overlay" onClick={() => setShowScheduleModal(false)}>
+              <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+                <div className="modal-header">
+                  <h2>Edit Your Workout Schedule</h2>
+                  <button className="modal-close" onClick={() => setShowScheduleModal(false)}>×</button>
+                </div>
+                
+                <div className="schedule-editor">
+                  {Object.entries(editingSchedule).map(([day, data]) => (
+                    <div key={day} className="day-editor">
+                      <label className="day-checkbox">
+                        <input
+                          type="checkbox"
+                          checked={data.enabled}
+                          onChange={(e) => setEditingSchedule({
+                            ...editingSchedule,
+                            [day]: { ...data, enabled: e.target.checked }
+                          })}
+                        />
+                        <span className="day-name-editor">{day}</span>
+                      </label>
+                      
+                      {data.enabled && (
+                        <select
+                          value={data.time}
+                          onChange={(e) => setEditingSchedule({
+                            ...editingSchedule,
+                            [day]: { ...data, time: e.target.value }
+                          })}
+                          className="time-selector"
+                        >
+                          <option value="morning">Morning (6am-10am)</option>
+                          <option value="afternoon">Afternoon (1pm-5pm)</option>
+                          <option value="evening">Evening (5pm-9pm)</option>
+                        </select>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                
+                <div className="modal-footer">
+                  <button className="modal-button cancel" onClick={() => setShowScheduleModal(false)}>
+                    Cancel
+                  </button>
+                  <button 
+                    className="modal-button save" 
+                    onClick={handleScheduleSave}
+                    disabled={isLoading}
+                  >
+                    {isLoading ? 'Saving...' : 'Save Changes'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );

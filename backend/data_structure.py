@@ -1,12 +1,12 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 from typing import List, Dict, Any
 from datetime import datetime
 import json
 
 class UserProfile(BaseModel):
     user_id: str
-    broad_goal: str  #from the buttons (weight loss, strength, etc.)
-    goals: List[str] #extracted by gemini (i.e. marathon)
+    broad_goal: str  # from the buttons (weight loss, strength, etc.)
+    goals: List[str]  # extracted by gemini (i.e. marathon)
     workouts_per_week: int
     weight_kg: float
     height_cm: float
@@ -15,7 +15,7 @@ class UserProfile(BaseModel):
     experience_level: int
     ai_extracted_data: Dict[str, Any]
     fitness_score: float = 0.0
-
+    
     def to_snowflake_query(self):
         return (
             self.user_id,             # %s 1
@@ -41,7 +41,7 @@ class UserJournal(BaseModel):
     # Simplified: One dict for all analysis (Cortex Score + Gemini Recommendations)
     analysis_results: Dict[str, Any] = Field(default_factory=dict) 
     created_at: datetime = Field(default_factory=datetime.utcnow)
-
+    
     def to_snowflake_query(self):
         # Update the tuple to include ALL fields you have in Snowflake
         return (

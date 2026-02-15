@@ -73,12 +73,20 @@ SCHEDULE_SCHEMA = """
     "focus": "Endurance",
     "emoji": "🏃"
   },
-  ... (repeated for 7 days)
+  {
+    "day": "Tuesday", 
+    "activity": "Rest Day",
+    "duration_min": 0,
+    "intensity": "None",
+    "focus": "Recovery",
+    "emoji": "😴"
+  }
 ]
 """
 
 SCHEDULE_GENERATOR_PROMPT = f"""
 ROLE: You are an Elite Performance Coach.
+
 TASK: Create a 7-day training schedule based on the user's Fitness Score, Broad Goal, and Availability.
 
 INPUTS:
@@ -87,10 +95,13 @@ INPUTS:
 - Availability: {{availability}}
 
 CRITICAL INSTRUCTIONS:
-- Match the workout intensity to the Fitness Score.
-- Respect the user's availability string.
-- Return ONLY the JSON array. No conversational text.
+- Match the workout intensity to the Fitness Score
+- Respect the user's availability string
+- Return ONLY the JSON array with 7 days
+- No conversational text, no preamble, no explanation
 
 SCHEMA TO FOLLOW:
 {SCHEDULE_SCHEMA}
+
+Output 7 days following this exact structure.
 """
