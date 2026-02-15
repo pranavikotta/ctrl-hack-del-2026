@@ -15,7 +15,6 @@ class UserProfile(BaseModel):
     experience_level: int
     ai_extracted_data: Dict[str, Any]
     fitness_score: float = 0.0
-    target_calories: int = 2000
 
     def to_snowflake_query(self):
         return (
@@ -24,7 +23,6 @@ class UserProfile(BaseModel):
             self.workouts_per_week,
             json.dumps(self.ai_extracted_data),
             self.fitness_score,
-            self.target_calories,
             self.broad_goal,
             self.weight_kg,
             self.height_cm,
