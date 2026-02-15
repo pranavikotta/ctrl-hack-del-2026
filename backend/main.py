@@ -5,6 +5,7 @@ import joblib
 import numpy as np
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware # <--- IMPORT THIS
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -18,10 +19,6 @@ from system_prompts import ONBOARD_PROMPT, JOURNAL_INPUT_PROMPT, JOURNAL_OUTPUT_
 load_dotenv()
 
 app = FastAPI()
-
-# --- LOAD ML MODEL & SCALER ---
-fit_model = joblib.load('fitness_model.pkl')
-fit_scaler = joblib.load('scaler.pkl')
 
 # 2. Configuration from .env
 SNOWFLAKE_CONFIG = {
