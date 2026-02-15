@@ -194,3 +194,45 @@ async def health_check():
         return {"status": "healthy", "database": "connected"}
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
+    
+
+# --- SCHEDULE GENERATION ENDPOINT ---
+@app.post("/generate-schedule")
+async def generate_schedule(user_id: str):
+    conn = connect(**SNOWFLAKE_CONFIG)
+    cur = conn.cursor()
+    try:
+        # 1. Fetch the data your ML model and Gemini previously saved
+        cur.execute("""
+            SELECT BROAD_GOAL, FITNESS_SCORE, AI_EXTRACTED_DATA 
+            FROM USER_PROFILES WHERE USER_ID = %s
+        """, (user_id,))
+        row = cur.fetchone()
+        
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+            
+        broad_goal, fitness_score, extracted_data = row
+        availability = extracted_data.get('schedule', 'General availability')
+
+        # 2. Feed it into the new Prompt
+        final_prompt = SCHEDULE_GENERATOR_PROMPT.format(
+            fitness_score=fitness_score,
+            broad_goal=broad_goal,
+            availability=availability
+        )
+        
+        # 3. Get the structured JSON from Gemini
+        response = journal_model.generate_content(final_prompt)
+        
+        # 4. Extract just the JSON list
+        json_match = re.search(r'\[.*\]', response.text, re.DOTALL)
+        if json_match:
+            structured_plan = json.loads(json_match.group())
+            return {"user_id": user_id, "weekly_plan": structured_plan}
+        
+        return {"error": "AI failed to generate a valid JSON schedule"}
+        
+    finally:
+        cur.close()
+        conn.close()

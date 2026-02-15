@@ -25,7 +25,6 @@ JSON SCHEMA:
   "height_cm": float,
   "age": int,
   "resting_bpm": int,
-  "experience_level": int,
   "ai_extracted_data": {"schedule": "string", "injuries": "string"}
 }
 """
@@ -58,4 +57,37 @@ Observation: State the detected physiological/mental state based on the score (e
 Activity Correlation: Match the state to an activity from their profile that optimizes for serotonin or recovery (e.g., 'Historical data suggests Yoga increases your recovery markers').
 Strict Recommendation: Provide 1-2 direct actions.
 Tone: Clinical, objective, and concise. No conversational filler like 'I'm sorry' or 'That sounds hard'.
+"""
+
+# This is for the AI to read so it knows how to format the data
+SCHEDULE_SCHEMA = """
+[
+  {
+    "day": "Monday",
+    "activity": "Long Distance Run",
+    "duration_min": 60,
+    "intensity": "Moderate",
+    "focus": "Endurance",
+    "emoji": "🏃"
+  },
+  ... (repeated for 7 days)
+]
+"""
+
+SCHEDULE_GENERATOR_PROMPT = f"""
+ROLE: You are an Elite Performance Coach.
+TASK: Create a 7-day training schedule based on the user's Fitness Score, Broad Goal, and Availability.
+
+INPUTS:
+- Fitness Score: {{fitness_score}} (0.0 is Beginner, 1.0 is Pro)
+- Goal: {{broad_goal}}
+- Availability: {{availability}}
+
+CRITICAL INSTRUCTIONS:
+- Match the workout intensity to the Fitness Score.
+- Respect the user's availability string.
+- Return ONLY the JSON array. No conversational text.
+
+SCHEMA TO FOLLOW:
+{SCHEDULE_SCHEMA}
 """
