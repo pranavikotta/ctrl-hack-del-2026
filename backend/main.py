@@ -5,7 +5,7 @@ import joblib
 import numpy as np
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware # <--- IMPORT THIS
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -20,6 +20,15 @@ load_dotenv()
 
 app = FastAPI()
 
+# Add CORS middleware to allow frontend requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # 2. Configuration from .env
 SNOWFLAKE_CONFIG = {
     "user": os.getenv("SNOWFLAKE_USER"),
@@ -31,6 +40,10 @@ SNOWFLAKE_CONFIG = {
 }
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Load ML models
+fit_model = joblib.load('fitness_model.pkl')
+fit_scaler = joblib.load('scaler.pkl')
 
 class OnboardRequest(BaseModel):
     chat_history: List[Dict[str, str]]
@@ -50,20 +63,12 @@ journal_model = genai.GenerativeModel(
 # --- ONBOARDING ENDPOINT ---
 
 @app.post("/onboard")
-async def onboard_user(request: OnboardRequest):
-    chat_history = request.chat_history
-    user_stats = request.user_stats
+async def onboard_user(data: List[Dict[str, str]]):
+    """
+    Expects array of chat messages: [{"role": "user", "content": "..."}, ...]
+    """
+    chat_history = data
     
-    # 1. Context Injection
-    if len(chat_history) == 1 and user_stats:
-        context_prefix = (
-            f"[SYSTEM CONTEXT: Goal: {user_stats.get('broad_goal')}. "
-            f"Stats: {user_stats.get('weight_kg')}kg, {user_stats.get('age')}y, "
-            f"BPM: {user_stats.get('resting_bpm')}, Freq: {user_stats.get('workouts_per_week')} sessions/wk. "
-            f"Acknowledge this and ask about injuries and specific history.]\n\n"
-        )
-        chat_history[0]["content"] = context_prefix + chat_history[0]["content"]
-
     formatted_messages = []
     for msg in chat_history:
         role = "user" if msg["role"] == "user" else "model"
@@ -80,63 +85,91 @@ async def onboard_user(request: OnboardRequest):
         if json_match:
             raw_json = json.loads(json_match.group())
             
-            # Merge button stats from frontend
-            if user_stats:
-                raw_json.update(user_stats)
-            
-            # 2. ML INFERENCE (Calculating the Score)
-            try:
-                age = float(raw_json.get("age", 0))
-                weight = float(raw_json.get("weight_kg", 0))
-                height_cm = float(raw_json.get("height_cm", 0))
-                resting_bpm = float(raw_json.get("resting_bpm", 0))
-                workout_freq = float(raw_json.get("workouts_per_week", 0))
-                
-                # Feature Engineering
-                height_m = height_cm / 100
-                bmi = weight / (height_m ** 2) if height_m > 0 else 0
-                max_bpm = 220 - age
-                
-                # 3. Arrange features (ORDER MUST MATCH TRAINING SCRIPT)
-                # ['Age', 'Weight (kg)', 'Height (m)', 'Resting_BPM', 'Max_BPM', 'Workout_Frequency', 'BMI']
-                input_features = np.array([[age, weight, height_m, resting_bpm, max_bpm, workout_freq, bmi]])
-                
-                # 4. Scale and Predict Probability
-                scaled_input = fit_scaler.transform(input_features)
-                # predict_proba returns [prob_class_0, prob_class_1]
-                fitness_score = fit_model.predict_proba(scaled_input)[0][1] 
-                
-                raw_json["fitness_score"] = round(float(fitness_score), 2)
-                
-            except Exception as e:
-                print(f"Inference Error: {e}")
-                raw_json["fitness_score"] = 0.0
-
-            # 5. Save to Snowflake
-            profile = UserProfile(**raw_json)
-            conn = connect(**SNOWFLAKE_CONFIG)
-            cur = conn.cursor()
-            try:
-                query = """
-                INSERT INTO USER_PROFILES (
-                    USER_ID, GOALS, WORKOUTS_PER_WEEK, AI_EXTRACTED_DATA, 
-                    FITNESS_SCORE, BROAD_GOAL, WEIGHT_KG, HEIGHT_CM, AGE, 
-                    RESTING_BPM, EXPERIENCE_LEVEL, CREATED_AT
-                )
-                SELECT %s, PARSE_JSON(%s), %s, PARSE_JSON(%s), %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP()
-                """
-                cur.execute(query, profile.to_snowflake_query())
-                conn.commit()
-            finally:
-                cur.close()
-                conn.close()
-                
-            return {"status": "complete", "data": profile}
+            # Return partial profile - metrics will be added later
+            return {
+                "status": "needs_metrics", 
+                "partial_data": raw_json,
+                "message": "Great! Now we need some metrics to personalize your experience."
+            }
 
         return {"status": "chatting", "message": response_text}
 
     except Exception as e:
         print(f"ERROR: {str(e)}")
+        return {"status": "error", "message": f"Server Error: {str(e)}"}
+
+
+@app.post("/complete_profile")
+async def complete_profile(profile_data: dict):
+    """
+    Receives complete profile with metrics and calculates fitness score
+    """
+    try:
+        # Extract data
+        age = float(profile_data.get("age", 0))
+        weight = float(profile_data.get("weight_kg", 0))
+        height_cm = float(profile_data.get("height_cm", 0))
+        resting_bpm = float(profile_data.get("resting_bpm", 0))
+        workout_freq = float(profile_data.get("workouts_per_week", 0))
+        
+        # Feature Engineering
+        height_m = height_cm / 100
+        bmi = weight / (height_m ** 2) if height_m > 0 else 0
+        max_bpm = 220 - age
+        
+        # Arrange features matching training order
+        input_features = np.array([[age, weight, height_m, resting_bpm, max_bpm, workout_freq, bmi]])
+        
+        # Scale and Predict
+        scaled_input = fit_scaler.transform(input_features)
+        fitness_proba = fit_model.predict_proba(scaled_input)[0][1]
+        
+        # Predict experience level (1-3)
+        experience_prediction = fit_model.predict(scaled_input)[0]
+        experience_level = int(experience_prediction) + 1  # Convert 0/1 to 1/2/3
+        
+        profile_data["fitness_score"] = round(float(fitness_proba), 2)
+        profile_data["experience_level"] = experience_level
+        
+        # Create profile
+        profile = UserProfile(**profile_data)
+        
+        # Save to Snowflake
+        conn = connect(**SNOWFLAKE_CONFIG)
+        cur = conn.cursor()
+        try:
+            query = """
+            INSERT INTO USER_PROFILES (
+                USER_ID, GOALS, WORKOUTS_PER_WEEK, AI_EXTRACTED_DATA, 
+                FITNESS_SCORE, WEIGHT_KG, HEIGHT_CM, AGE, 
+                RESTING_BPM, EXPERIENCE_LEVEL, CREATED_AT, BROAD_GOAL
+            )
+            VALUES (%s, PARSE_JSON(%s), %s, PARSE_JSON(%s), %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s)
+            """
+            cur.execute(query, (
+                profile.user_id,
+                json.dumps(profile.goals),
+                profile.workouts_per_week,
+                json.dumps(profile.ai_extracted_data),
+                profile.fitness_score,
+                profile.weight_kg,
+                profile.height_cm,
+                profile.age,
+                profile.resting_bpm,
+                profile.experience_level,
+                profile.broad_goal
+            ))
+            conn.commit()
+        finally:
+            cur.close()
+            conn.close()
+            
+        return {"status": "complete", "data": profile.dict()}
+
+    except Exception as e:
+        print(f"ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return {"status": "error", "message": f"Server Error: {str(e)}"}
 
 # --- JOURNALING ENDPOINT ---
@@ -155,13 +188,18 @@ async def process_journal(user_id: str, entry_text: str):
     cur = conn.cursor()
     
     try:
-        cur.execute(
-        "INSERT INTO USER_JOURNALS (USER_ID, JOURNAL, SENTIMENT_ANALYSIS, CREATED_AT) VALUES (%s, %s, %s, CURRENT_TIMESTAMP())",
-        (user_id, cleaned_data["cleaned_text"], sentiment_score))
-        
+        # First, get sentiment score
         cur.execute("SELECT SNOWFLAKE.CORTEX.SENTIMENT(%s)", (cleaned_data["cleaned_text"],))
         sentiment_score = cur.fetchone()[0]
+        
+        # Insert journal entry
+        cur.execute(
+            "INSERT INTO USER_JOURNALS (USER_ID, JOURNAL, SENTIMENT_ANALYSIS, CREATED_AT) VALUES (%s, %s, %s, CURRENT_TIMESTAMP())",
+            (user_id, cleaned_data["cleaned_text"], sentiment_score)
+        )
+        conn.commit()
 
+        # Get user goals
         cur.execute("SELECT GOALS FROM USER_PROFILES WHERE USER_ID = %s", (user_id,))
         row = cur.fetchone()
         user_interests = row[0] if row else "General wellness"
