@@ -13,7 +13,12 @@ from snowflake.connector import connect
 
 # Import your models and prompts
 from data_structure import UserProfile, UserJournal
-from system_prompts import ONBOARD_PROMPT, JOURNAL_INPUT_PROMPT, JOURNAL_OUTPUT_PROMPT
+from system_prompts import (
+    ONBOARD_PROMPT, 
+    JOURNAL_INPUT_PROMPT, 
+    JOURNAL_OUTPUT_PROMPT, 
+    SCHEDULE_GENERATOR_PROMPT
+)
 
 # 1. Load Environment Variables
 load_dotenv()
@@ -73,9 +78,6 @@ async def onboard_user(data: List[Dict[str, str]]):
     for msg in chat_history:
         role = "user" if msg["role"] == "user" else "model"
         formatted_messages.append({"role": role, "parts": [msg["content"]]})
-
-    if not formatted_messages or formatted_messages[-1]["role"] != "user":
-        return {"status": "chatting", "message": "Waiting for your input..."}
 
     try:
         response = onboard_model.generate_content(formatted_messages)
@@ -176,17 +178,14 @@ async def complete_profile(profile_data: dict):
 
 @app.post("/journal")
 async def process_journal(user_id: str, entry_text: str):
-    raw_response = journal_model.generate_content(f"{JOURNAL_INPUT_PROMPT}\n\nUser Entry: {entry_text}")
+    raw_response = journal_model.generate_content(f"{JOURNAL_INPUT_PROMPT}\n\nEntry: {entry_text}")
     json_match = re.search(r'\{.*\}', raw_response.text, re.DOTALL)
     
-    if not json_match:
-        raise HTTPException(status_code=500, detail="AI failed to structure entry")
-    
+    if not json_match: raise HTTPException(status_code=500, detail="Parsing Error")
     cleaned_data = json.loads(json_match.group())
 
     conn = connect(**SNOWFLAKE_CONFIG)
     cur = conn.cursor()
-    
     try:
         # First, get sentiment score
         cur.execute("SELECT SNOWFLAKE.CORTEX.SENTIMENT(%s)", (cleaned_data["cleaned_text"],))
@@ -202,15 +201,15 @@ async def process_journal(user_id: str, entry_text: str):
         # Get user goals
         cur.execute("SELECT GOALS FROM USER_PROFILES WHERE USER_ID = %s", (user_id,))
         row = cur.fetchone()
-        user_interests = row[0] if row else "General wellness"
+        user_interests = row[0] if row else "General fitness"
 
         final_prompt = JOURNAL_OUTPUT_PROMPT.format(
             cleaned_text=cleaned_data["cleaned_text"],
             cortex_score=sentiment_score,
             user_goals_and_activities=user_interests
         )
-        
         analysis_response = journal_model.generate_content(final_prompt)
+        conn.commit()
         
         return {
             "score": sentiment_score,
@@ -222,55 +221,77 @@ async def process_journal(user_id: str, entry_text: str):
         cur.close()
         conn.close()
 
-# --- CONNECTION TEST ENDPOINT ---
-
-@app.get("/health")
-async def health_check():
-    try:
-        conn = connect(**SNOWFLAKE_CONFIG)
-        conn.close()
-        return {"status": "healthy", "database": "connected"}
-    except Exception as e:
-        return {"status": "unhealthy", "error": str(e)}
-    
-
 # --- SCHEDULE GENERATION ENDPOINT ---
+
 @app.post("/generate-schedule")
 async def generate_schedule(user_id: str):
     conn = connect(**SNOWFLAKE_CONFIG)
     cur = conn.cursor()
     try:
-        # 1. Fetch the data your ML model and Gemini previously saved
-        cur.execute("""
-            SELECT BROAD_GOAL, FITNESS_SCORE, AI_EXTRACTED_DATA 
-            FROM USER_PROFILES WHERE USER_ID = %s
-        """, (user_id,))
+        cur.execute("SELECT BROAD_GOAL, FITNESS_SCORE, AI_EXTRACTED_DATA FROM USER_PROFILES WHERE USER_ID = %s", (user_id,))
         row = cur.fetchone()
-        
-        if not row:
-            raise HTTPException(status_code=404, detail="User not found")
+        if not row: raise HTTPException(status_code=404, detail="Not Found")
             
         broad_goal, fitness_score, extracted_data = row
-        availability = extracted_data.get('schedule', 'General availability')
+        availability = extracted_data.get('schedule', '3 days a week')
 
-        # 2. Feed it into the new Prompt
-        final_prompt = SCHEDULE_GENERATOR_PROMPT.format(
+        prompt = SCHEDULE_GENERATOR_PROMPT.format(
             fitness_score=fitness_score,
             broad_goal=broad_goal,
             availability=availability
         )
         
-        # 3. Get the structured JSON from Gemini
-        response = journal_model.generate_content(final_prompt)
-        
-        # 4. Extract just the JSON list
+        response = journal_model.generate_content(prompt)
         json_match = re.search(r'\[.*\]', response.text, re.DOTALL)
+        
         if json_match:
-            structured_plan = json.loads(json_match.group())
-            return {"user_id": user_id, "weekly_plan": structured_plan}
+            return {"user_id": user_id, "weekly_plan": json.loads(json_match.group())}
         
-        return {"error": "AI failed to generate a valid JSON schedule"}
+        return {"error": "Invalid AI JSON"}
+    finally:
+        cur.close()
+        conn.close()
+
+@app.get("/health")
+async def health_check():
+    return {"status": "alive"}
+
+@app.get("/profile/{user_id}")
+async def get_user_profile(user_id: str):
+    conn = connect(**SNOWFLAKE_CONFIG)
+    cur = conn.cursor()
+    
+    try:
+        # Calculate BMI and Max BPM directly in SQL for efficiency
+        query = """
+        SELECT 
+            USER_ID, 
+            AGE, 
+            HEIGHT_CM, 
+            WEIGHT_KG, 
+            RESTING_BPM,
+            -- BMI Formula: kg / (m^2)
+            ROUND(WEIGHT_KG / SQUARE(HEIGHT_CM / 100), 1) as BMI,
+            -- Max BPM Formula: 220 - Age
+            (220 - AGE) as MAX_BPM
+        FROM USER_PROFILES 
+        WHERE USER_ID = %s
+        """
+        cur.execute(query, (user_id,))
+        row = cur.fetchone()
         
+        if not row:
+            raise HTTPException(status_code=404, detail="User profile not found")
+            
+        return {
+            "user_id": row[0],
+            "age": row[1],
+            "height_cm": row[2],
+            "weight_kg": row[3],
+            "resting_bpm": row[4],
+            "bmi": row[5],
+            "max_bpm": row[6]
+        }
     finally:
         cur.close()
         conn.close()
