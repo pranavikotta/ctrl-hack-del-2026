@@ -333,7 +333,16 @@ button:disabled:hover {
   box-shadow: 0 4px 20px rgba(100, 181, 246, 0.1);
 }
 
-/* Smooth transitions for message appearance */
+/* Profile Card */
+.profile-card {
+  position: relative;
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.profile-card--expanded {
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 20px 80px rgba(100, 181, 246, 0.25), 0 0 0 1px rgba(100, 181, 246, 0.15);
+}
 .typing-block {
   animation: slideIn 0.6s ease;
 }

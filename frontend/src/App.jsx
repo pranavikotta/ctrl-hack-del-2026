@@ -53,6 +53,14 @@ function App() {
     remaining: 1
   });
 
+  // State for user profile card (fetched from /profile/{user_id})
+  const [profileData, setProfileData] = useState(null);
+  const [profileExpanded, setProfileExpanded] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileEditing, setProfileEditing] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileEdits, setProfileEdits] = useState({});
+
   // State for typing animation
   const [displayedText, setDisplayedText] = useState("");
   const [isTyping, setIsTyping] = useState(false);
@@ -71,6 +79,10 @@ function App() {
   useEffect(() => {
     if (userProfile && currentPage === 'dashboard') {
       fetchDashboardData();
+      // ALSO fetch profile data immediately for the profile card
+      if (!profileData) {
+        fetchUserProfile(userProfile.user_id);
+      }
     }
   }, [userProfile, currentPage]);
 
@@ -90,10 +102,97 @@ function App() {
       const statsData = await statsResponse.json();
       // Store in state for workout progress card
       if (statsData.completed !== undefined) {
-        setWorkoutStats(statsData);
+        // Calculate missing fields if backend doesn't provide them
+        const completed = statsData.completed || 0;
+        const goal = statsData.goal || 0;
+        const percentage = statsData.percentage ?? (goal === 0 ? 0 : Math.round((completed / goal) * 100));
+        const remaining = statsData.remaining ?? Math.max(0, goal - completed);
+        
+        setWorkoutStats({
+          completed,
+          goal,
+          percentage,
+          remaining
+        });
       }
+
+      // Fetch biometric profile for the profile card
+      fetchUserProfile(userProfile.user_id);
     } catch (error) {
       console.error("Error fetching dashboard data:", error);
+    }
+  };
+
+  const fetchUserProfile = async (userId) => {
+    console.log('[DEBUG] Fetching profile for user:', userId);
+    setProfileLoading(true);
+    try {
+      const response = await fetch(`http://127.0.0.1:8000/profile/${userId}`);
+      const data = await response.json();
+      console.log('[DEBUG] Profile data received:', data);
+      if (data && !data.error) {
+        setProfileData(data);
+        console.log('[DEBUG] Profile state updated');
+      } else {
+        console.error('[DEBUG] Profile fetch error:', data.error);
+      }
+    } catch (error) {
+      console.error('[DEBUG] Profile fetch exception:', error);
+    } finally {
+      setProfileLoading(false);
+    }
+  };
+
+  const handleProfileSave = async () => {
+    if (!userProfile || !profileData) return;
+    setProfileSaving(true);
+    try {
+      // Recalculate derived fields locally
+      const weight = parseFloat(profileEdits.weight_kg ?? profileData.weight_kg);
+      const height_cm = parseFloat(profileEdits.height_cm ?? profileData.height_cm);
+      const age = parseInt(profileEdits.age ?? profileData.age);
+      const resting_bpm = parseInt(profileEdits.resting_bpm ?? profileData.resting_bpm);
+
+      const response = await fetch(
+        `http://127.0.0.1:8000/profile/${userProfile.user_id}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ weight_kg: weight, height_cm, age, resting_bpm }),
+        }
+      );
+      const data = await response.json();
+      
+      if (data.status === 'updated') {
+        // Update local state with ALL returned values including recalculated fitness_score
+        setProfileData(prev => ({
+          ...prev,
+          age: data.age,
+          height_cm: data.height_cm,
+          weight_kg: data.weight_kg,
+          resting_bpm: data.resting_bpm,
+          fitness_score: data.fitness_score, // This gets recalculated by backend
+          experience_level: data.experience_level
+        }));
+        
+        // Also update userProfile if needed
+        setUserProfile(prev => ({
+          ...prev,
+          fitness_score: data.fitness_score,
+          experience_level: data.experience_level
+        }));
+        
+        setProfileEditing(false);
+        setProfileEdits({});
+        console.log('Profile saved successfully:', data);
+      } else {
+        alert('Save failed: ' + (data.message || 'Unknown error'));
+      }
+    } catch (err) {
+      console.error('Profile save error:', err);
+      alert('Could not reach server.');
+    } finally {
+      setProfileSaving(false);
     }
   };
 
@@ -473,14 +572,329 @@ function App() {
               </div>
             </div>
 
-            <div className="dashboard-card">
-              <div className="card-title">Key Metrics</div>
-              <div className="card-content">
-                <p>Age: {metrics.age}</p>
-                <p>Weight: {metrics.weight_kg} kg</p>
-                <p>Height: {metrics.height_cm} cm</p>
-                <p>Resting BPM: {metrics.resting_bpm}</p>
+            {/* Expandable User Profile Card */}
+            <div
+              className={`dashboard-card profile-card${profileExpanded ? ' profile-card--expanded' : ''}`}
+              style={profileExpanded ? {
+                position: 'fixed', top: '50%', left: '50%',
+                transform: 'translate(-50%, -50%)',
+                zIndex: 1000, width: '90%', maxWidth: '700px',
+                maxHeight: '85vh', overflowY: 'auto', padding: '40px',
+              } : { justifyContent: 'flex-start' }}
+            >
+              {/* Backdrop */}
+              {profileExpanded && (
+                <div onClick={() => { setProfileExpanded(false); setProfileEditing(false); setProfileEdits({}); }}
+                  style={{ position: 'fixed', inset: 0, background: 'rgba(21,101,192,0.08)',
+                    backdropFilter: 'blur(4px)', zIndex: -1 }} />
+              )}
+
+              {/* ── Title row — always at top ── */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                width: '100%', marginBottom: profileExpanded ? '24px' : '12px' }}>
+                <div className="card-title" style={{ margin: 0 }}>User Profile</div>
+                {profileExpanded && profileData && !profileEditing && (
+                  <button
+                    onClick={() => { setProfileEditing(true); setProfileEdits({}); }}
+                    style={{ padding: '6px 14px', fontSize: '13px', borderRadius: '10px',
+                      background: 'rgba(100,181,246,0.12)', border: '1.5px solid rgba(100,181,246,0.35)',
+                      color: '#1565c0', cursor: 'pointer', marginTop: 0, boxShadow: 'none' }}>
+                    ✏️ Edit
+                  </button>
+                )}
+                {profileExpanded && profileEditing && (
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button
+                      onClick={handleProfileSave} disabled={profileSaving}
+                      style={{ padding: '6px 14px', fontSize: '13px', borderRadius: '10px',
+                        background: 'rgba(100,181,246,0.2)', border: '1.5px solid rgba(100,181,246,0.5)',
+                        color: '#1565c0', cursor: 'pointer', marginTop: 0, boxShadow: 'none' }}>
+                      {profileSaving ? 'Saving…' : '💾 Save'}
+                    </button>
+                    <button
+                      onClick={() => { setProfileEditing(false); setProfileEdits({}); }}
+                      style={{ padding: '6px 14px', fontSize: '13px', borderRadius: '10px',
+                        background: 'rgba(255,255,255,0.4)', border: '1.5px solid rgba(100,181,246,0.2)',
+                        color: '#90caf9', cursor: 'pointer', marginTop: 0, boxShadow: 'none' }}>
+                      Cancel
+                    </button>
+                  </div>
+                )}
               </div>
+
+              {/* ── Collapsed view: summary pills ── */}
+              {!profileExpanded && (
+                <div className="card-content" style={{ gap: '6px', width: '100%' }}>
+                  {profileLoading ? (
+                    <p style={{ opacity: 0.5, fontSize: '14px' }}>Loading…</p>
+                  ) : profileData ? (
+                    <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', justifyContent: 'center' }}>
+                      {[
+                        { label: 'Age',    value: `${profileData.age} yrs` },
+                        { label: 'BMI',    value: profileData.bmi || Math.round((profileData.weight_kg / ((profileData.height_cm / 100) ** 2)) * 10) / 10 },
+                        { label: 'BPM',    value: profileData.resting_bpm },
+                      ].map(item => (
+                        <div key={item.label} style={{
+                          background: 'rgba(100,181,246,0.1)', border: '1px solid rgba(100,181,246,0.25)',
+                          borderRadius: '10px', padding: '6px 14px', fontSize: '14px',
+                          color: '#1565c0', textAlign: 'center' }}>
+                          <span style={{ opacity: 0.6, display: 'block', fontSize: '11px', marginBottom: '2px' }}>{item.label}</span>
+                          <strong>{item.value}</strong>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p style={{ opacity: 0.5, fontSize: '14px' }}>Loading profile...</p>
+                  )}
+                </div>
+              )}
+
+              {/* ── Expanded view ── */}
+              {profileExpanded && (
+                <div style={{ width: '100%' }}>
+                  {profileLoading ? (
+                    <p style={{ textAlign: 'center', color: '#64b5f6', opacity: 0.6 }}>Fetching your data…</p>
+                  ) : profileData ? (
+                    <>
+                      {/* Editable fields: Age / Height / Weight */}
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))',
+                        gap: '16px', marginBottom: '24px' }}>
+                        {[
+                          { key: 'age',       label: 'Age',    unit: 'yrs', icon: '🎂', min: 15, max: 80,  step: 1,   editable: true },
+                          { key: 'height_cm', label: 'Height', unit: 'cm',  icon: '📏', min: 140, max: 220, step: 1,   editable: true },
+                          { key: 'weight_kg', label: 'Weight', unit: 'kg',  icon: '⚖️', min: 40,  max: 150, step: 0.5, editable: true },
+                        ].map(field => {
+                          const current = profileEdits[field.key] !== undefined
+                            ? profileEdits[field.key]
+                            : profileData[field.key];
+                          return (
+                            <div key={field.key} style={{
+                              background: profileEditing ? 'rgba(100,181,246,0.06)' : 'rgba(255,255,255,0.55)',
+                              backdropFilter: 'blur(12px)',
+                              border: profileEditing ? '1.5px solid rgba(100,181,246,0.4)' : '1.5px solid rgba(100,181,246,0.25)',
+                              borderRadius: '16px', padding: '18px 14px', textAlign: 'center',
+                              transition: 'all 0.3s ease' }}>
+                              <div style={{ fontSize: '22px', marginBottom: '6px' }}>{field.icon}</div>
+                              <div style={{ fontSize: '26px', fontWeight: '300', color: '#1565c0', lineHeight: 1 }}>{current}</div>
+                              <div style={{ fontSize: '13px', color: '#90caf9', marginTop: '4px' }}>{field.unit}</div>
+                              <div style={{ fontSize: '11px', color: '#64b5f6', marginTop: '5px', fontWeight: '500',
+                                letterSpacing: '0.5px', textTransform: 'uppercase' }}>{field.label}</div>
+                              {profileEditing && (
+                                <input type="range" min={field.min} max={field.max} step={field.step}
+                                  value={current}
+                                  onChange={e => setProfileEdits(prev => ({
+                                    ...prev,
+                                    [field.key]: field.step < 1 ? parseFloat(e.target.value) : parseInt(e.target.value)
+                                  }))}
+                                  className="metric-slider"
+                                  style={{ marginTop: '10px', width: '100%' }} />
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <div style={{ height: '1px', background: 'rgba(100,181,246,0.15)', margin: '0 0 20px' }} />
+
+                      {/* Heart metrics row — resting BPM is editable, max BPM & BMI auto-recalculate */}
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+                        gap: '16px', marginBottom: '24px' }}>
+
+                        {/* Resting BPM — editable */}
+                        {(() => {
+                          const val = profileEdits.resting_bpm !== undefined ? profileEdits.resting_bpm : profileData.resting_bpm;
+                          return (
+                            <div style={{ background: profileEditing ? 'rgba(100,181,246,0.06)' : 'rgba(255,255,255,0.55)',
+                              backdropFilter: 'blur(12px)', border: profileEditing
+                                ? '1.5px solid rgba(100,181,246,0.4)' : '1.5px solid #64b5f640',
+                              borderRadius: '16px', padding: '18px 14px', textAlign: 'center',
+                              transition: 'all 0.3s ease' }}>
+                              <div style={{ fontSize: '24px', marginBottom: '6px' }}>💙</div>
+                              <div style={{ fontSize: '32px', fontWeight: '300', color: '#64b5f6', lineHeight: 1 }}>{val}</div>
+                              <div style={{ fontSize: '11px', color: '#64b5f6', marginTop: '5px', fontWeight: '500',
+                                textTransform: 'uppercase', letterSpacing: '0.5px' }}>Resting BPM</div>
+                              <div style={{ fontSize: '11px', color: '#90caf9', marginTop: '3px', opacity: 0.7 }}>Heart rate at rest</div>
+                              {profileEditing && (
+                                <input type="range" min={40} max={100} step={1} value={val}
+                                  onChange={e => setProfileEdits(prev => ({ ...prev, resting_bpm: parseInt(e.target.value) }))}
+                                  className="metric-slider" style={{ marginTop: '10px', width: '100%' }} />
+                              )}
+                            </div>
+                          );
+                        })()}
+
+                        {/* Max BPM — read-only, recalculates from age */}
+                        {(() => {
+                          const age = profileEdits.age !== undefined ? profileEdits.age : profileData.age;
+                          const maxBpm = 220 - age;
+                          return (
+                            <div style={{ background: 'rgba(255,255,255,0.55)', backdropFilter: 'blur(12px)',
+                              border: '1.5px solid #ef9a9a40', borderRadius: '16px', padding: '18px 14px', textAlign: 'center' }}>
+                              <div style={{ fontSize: '24px', marginBottom: '6px' }}>❤️‍🔥</div>
+                              <div style={{ fontSize: '32px', fontWeight: '300', color: '#ef9a9a', lineHeight: 1 }}>{maxBpm}</div>
+                              <div style={{ fontSize: '11px', color: '#64b5f6', marginTop: '5px', fontWeight: '500',
+                                textTransform: 'uppercase', letterSpacing: '0.5px' }}>Max BPM</div>
+                              <div style={{ fontSize: '11px', color: '#90caf9', marginTop: '3px', opacity: 0.7 }}>220 − age formula</div>
+                            </div>
+                          );
+                        })()}
+
+                        {/* BMI — read-only, recalculates live */}
+                        {(() => {
+                          const weight = profileEdits.weight_kg !== undefined ? profileEdits.weight_kg : profileData.weight_kg;
+                          const height = profileEdits.height_cm !== undefined ? profileEdits.height_cm : profileData.height_cm;
+                          const bmi = Math.round((weight / ((height / 100) ** 2)) * 10) / 10;
+                          const bmiColor = bmi < 18.5 ? '#ffd54f' : bmi < 25 ? '#66bb6a' : bmi < 30 ? '#ffa726' : '#ef9a9a';
+                          const bmiLabel = bmi < 18.5 ? 'Underweight' : bmi < 25 ? 'Healthy' : bmi < 30 ? 'Overweight' : 'Obese';
+                          return (
+                            <div style={{ background: 'rgba(255,255,255,0.55)', backdropFilter: 'blur(12px)',
+                              border: `1.5px solid ${bmiColor}40`, borderRadius: '16px', padding: '18px 14px', textAlign: 'center' }}>
+                              <div style={{ fontSize: '24px', marginBottom: '6px' }}>📊</div>
+                              <div style={{ fontSize: '32px', fontWeight: '300', color: bmiColor, lineHeight: 1 }}>{bmi}</div>
+                              <div style={{ fontSize: '11px', color: '#64b5f6', marginTop: '5px', fontWeight: '500',
+                                textTransform: 'uppercase', letterSpacing: '0.5px' }}>BMI</div>
+                              <div style={{ fontSize: '11px', marginTop: '3px', opacity: 0.75, color: bmiColor }}>{bmiLabel}</div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+
+                      {/* Heart Rate Zones — recalculate from current age */}
+                      {(() => {
+                        const age = profileEdits.age !== undefined ? profileEdits.age : profileData.age;
+                        const maxBpm = 220 - age;
+                        return (
+                          <div style={{ background: 'rgba(255,255,255,0.45)', backdropFilter: 'blur(12px)',
+                            border: '1.5px solid rgba(100,181,246,0.2)', borderRadius: '16px', padding: '20px 24px' }}>
+                            <div style={{ fontSize: '13px', color: '#64b5f6', fontWeight: '500',
+                              textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '12px' }}>
+                              Heart Rate Zones
+                            </div>
+                            {[
+                              { label: 'Zone 1 — Warm Up', pctLow: 50, pctHigh: 60, color: '#b3e5fc' },
+                              { label: 'Zone 2 — Fat Burn', pctLow: 60, pctHigh: 70, color: '#64b5f6' },
+                              { label: 'Zone 3 — Cardio',  pctLow: 70, pctHigh: 80, color: '#42a5f5' },
+                              { label: 'Zone 4 — Peak',    pctLow: 80, pctHigh: 90, color: '#1976d2' },
+                            ].map(zone => {
+                              const low  = Math.round(maxBpm * zone.pctLow  / 100);
+                              const high = Math.round(maxBpm * zone.pctHigh / 100);
+                              return (
+                                <div key={zone.label} style={{ display: 'flex', alignItems: 'center',
+                                  gap: '12px', marginBottom: '8px' }}>
+                                  <div style={{ width: '110px', fontSize: '12px', color: '#64b5f6',
+                                    textAlign: 'right', flexShrink: 0 }}>{zone.label}</div>
+                                  <div style={{ flex: 1, height: '10px', background: 'rgba(100,181,246,0.1)',
+                                    borderRadius: '5px', overflow: 'hidden' }}>
+                                    <div style={{ marginLeft: `${zone.pctLow - 50}%`,
+                                      width: `${zone.pctHigh - zone.pctLow}%`, height: '100%',
+                                      background: zone.color, borderRadius: '5px', opacity: 0.85 }} />
+                                  </div>
+                                  <div style={{ width: '72px', fontSize: '12px', color: '#90caf9', flexShrink: 0 }}>
+                                    {low}–{high} bpm
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        );
+                      })()}
+
+                      {profileEditing && (
+                        <p style={{ fontSize: '12px', color: '#90caf9', textAlign: 'center',
+                          marginTop: '16px', opacity: 0.7 }}>
+                          BMI and Max BPM update live as you adjust. Hit Save to persist changes.
+                        </p>
+                      )}
+
+                      {/* Edit/Save/Cancel buttons */}
+                      <div style={{ display: 'flex', gap: '10px', justifyContent: 'center', marginTop: '20px' }}>
+                        {!profileEditing ? (
+                          <button
+                            onClick={() => setProfileEditing(true)}
+                            style={{
+                              background: 'rgba(100,181,246,0.15)',
+                              border: '1.5px solid rgba(100,181,246,0.35)',
+                              color: '#1565c0',
+                              padding: '10px 24px',
+                              borderRadius: '12px',
+                              fontSize: '14px',
+                              fontWeight: '500',
+                              cursor: 'pointer',
+                              transition: 'all 0.3s ease'
+                            }}>
+                            ✏️ Edit Metrics
+                          </button>
+                        ) : (
+                          <>
+                            <button
+                              onClick={handleProfileSave}
+                              disabled={profileSaving}
+                              style={{
+                                background: profileSaving ? 'rgba(100,181,246,0.1)' : 'rgba(76,175,80,0.15)',
+                                border: '1.5px solid rgba(76,175,80,0.4)',
+                                color: '#2e7d32',
+                                padding: '10px 24px',
+                                borderRadius: '12px',
+                                fontSize: '14px',
+                                fontWeight: '500',
+                                cursor: profileSaving ? 'not-allowed' : 'pointer',
+                                transition: 'all 0.3s ease',
+                                opacity: profileSaving ? 0.6 : 1
+                              }}>
+                              {profileSaving ? '💾 Saving...' : '💾 Save Changes'}
+                            </button>
+                            <button
+                              onClick={() => {
+                                setProfileEditing(false);
+                                setProfileEdits({});
+                              }}
+                              disabled={profileSaving}
+                              style={{
+                                background: 'rgba(244,67,54,0.1)',
+                                border: '1.5px solid rgba(244,67,54,0.3)',
+                                color: '#c62828',
+                                padding: '10px 24px',
+                                borderRadius: '12px',
+                                fontSize: '14px',
+                                fontWeight: '500',
+                                cursor: profileSaving ? 'not-allowed' : 'pointer',
+                                transition: 'all 0.3s ease',
+                                opacity: profileSaving ? 0.6 : 1
+                              }}>
+                              ✖️ Cancel
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <p style={{ textAlign: 'center', color: '#64b5f6', opacity: 0.6 }}>
+                      Could not load profile data. Is the server running?
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* ── Expand / collapse button ── */}
+              <button
+                onClick={() => {
+                  if (!profileExpanded && !profileData && userProfile) fetchUserProfile(userProfile.user_id);
+                  setProfileExpanded(v => !v);
+                  setProfileEditing(false);
+                  setProfileEdits({});
+                }}
+                style={{
+                  position: 'absolute', bottom: '14px', right: '14px',
+                  width: '30px', height: '30px', borderRadius: '50%',
+                  background: 'rgba(100,181,246,0.15)',
+                  border: '1.5px solid rgba(100,181,246,0.35)',
+                  color: '#1565c0', fontSize: '15px',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  cursor: 'pointer', padding: 0, margin: 0, boxShadow: '0 2px 8px rgba(100,181,246,0.15)',
+                }}
+                title={profileExpanded ? 'Collapse' : 'Expand profile'}>
+                {profileExpanded ? '↙' : '↗'}
+              </button>
             </div>
 
             <div className="dashboard-card">
@@ -526,12 +940,12 @@ function App() {
                 <div className="progress-bar-container">
                   <div 
                     className="progress-bar-fill" 
-                    style={{width: `${workoutStats.percentage}%`}}
+                    style={{width: `${Math.max(0, Math.min(100, workoutStats.percentage || 0))}%`}}
                   ></div>
                 </div>
                 <div style={{fontSize: '14px', marginTop: '15px', opacity: 0.7}}>
-                  {workoutStats.remaining > 0 
-                    ? `${workoutStats.remaining} more ${workoutStats.remaining === 1 ? 'workout' : 'workouts'} to reach your weekly goal`
+                  {(workoutStats.remaining ?? 1) > 0
+                    ? `${workoutStats.remaining || 0} more ${workoutStats.remaining === 1 ? 'workout' : 'workouts'} to reach your weekly goal`
                     : '🎉 Weekly goal achieved!'}
                 </div>
               </div>

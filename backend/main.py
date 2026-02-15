@@ -1,297 +1,376 @@
 import os
 import re
 import json
+import uuid
 import joblib
 import numpy as np
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 from dotenv import load_dotenv
-import google.generativeai as genai
 from snowflake.connector import connect
 
 # Import your models and prompts
 from data_structure import UserProfile, UserJournal
 from system_prompts import (
-    ONBOARD_PROMPT, 
-    JOURNAL_INPUT_PROMPT, 
-    JOURNAL_OUTPUT_PROMPT, 
-    SCHEDULE_GENERATOR_PROMPT
+    ONBOARD_PROMPT,
+    JOURNAL_INPUT_PROMPT,
+    JOURNAL_OUTPUT_PROMPT,
+    SCHEDULE_GENERATOR_PROMPT,
 )
 
-# 1. Load Environment Variables
 load_dotenv()
 
 app = FastAPI()
 
-# Add CORS middleware to allow frontend requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 2. Configuration from .env
 SNOWFLAKE_CONFIG = {
-    "user": os.getenv("SNOWFLAKE_USER"),
-    "password": os.getenv("SNOWFLAKE_PASSWORD"),
-    "account": os.getenv("SNOWFLAKE_ACCOUNT"),
+    "user":      os.getenv("SNOWFLAKE_USER"),
+    "password":  os.getenv("SNOWFLAKE_PASSWORD"),
+    "account":   os.getenv("SNOWFLAKE_ACCOUNT"),
     "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE"),
-    "database": os.getenv("SNOWFLAKE_DATABASE"),
-    "schema": os.getenv("SNOWFLAKE_SCHEMA")
+    "database":  os.getenv("SNOWFLAKE_DATABASE"),
+    "schema":    os.getenv("SNOWFLAKE_SCHEMA"),
 }
 
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+CORTEX_MODEL = "gemini-2.5-flash" 
 
-# Load ML models
-fit_model = joblib.load('fitness_model.pkl')
-fit_scaler = joblib.load('scaler.pkl')
+fit_model  = joblib.load("fitness_model.pkl")
+fit_scaler = joblib.load("scaler.pkl")
 
-class OnboardRequest(BaseModel):
-    chat_history: List[Dict[str, str]]
-    user_stats: Optional[Dict[str, Any]] = None
+def _get_conn():
+    return connect(**SNOWFLAKE_CONFIG)
 
-onboard_model = genai.GenerativeModel(
-    model_name='gemini-2.0-flash',
-    system_instruction=ONBOARD_PROMPT,
-    generation_config={"temperature": 0.1}
-)
+def cortex_complete(prompt: str, system: str = "", temperature: float = 0.3) -> str:
+    conn = _get_conn()
+    cur  = conn.cursor()
+    try:
+        if system:
+            messages = json.dumps([
+                {"role": "system", "content": system},
+                {"role": "user",   "content": prompt},
+            ])
+            options = json.dumps({"temperature": temperature})
+            cur.execute(
+                "SELECT SNOWFLAKE.CORTEX.COMPLETE(%s, PARSE_JSON(%s), PARSE_JSON(%s))",
+                (CORTEX_MODEL, messages, options),
+            )
+        else:
+            cur.execute(
+                "SELECT SNOWFLAKE.CORTEX.COMPLETE(%s, %s)",
+                (CORTEX_MODEL, prompt),
+            )
+        
+        result = cur.fetchone()[0]
+        if isinstance(result, str):
+            try:
+                parsed = json.loads(result)
+                if "choices" in parsed:
+                    return parsed["choices"][0]["messages"].strip()
+                return result.strip()
+            except Exception:
+                return result.strip()
+        return str(result).strip()
+    finally:
+        cur.close()
+        conn.close()
 
-journal_model = genai.GenerativeModel(
-    model_name='gemini-2.0-flash',
-    generation_config={"temperature": 0.7}
-)
+def cortex_complete_chat(history: List[Dict[str, str]], system: str = "") -> str:
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    for msg in history:
+        role = "user" if msg["role"] == "user" else "assistant"
+        messages.append({"role": role, "content": msg["content"]})
 
-# --- ONBOARDING ENDPOINT ---
+    conn = _get_conn()
+    cur  = conn.cursor()
+    try:
+        options = json.dumps({"temperature": 0.1})
+        cur.execute(
+            "SELECT SNOWFLAKE.CORTEX.COMPLETE(%s, PARSE_JSON(%s), PARSE_JSON(%s))",
+            (CORTEX_MODEL, json.dumps(messages), options),
+        )
+        result = cur.fetchone()[0]
+        if isinstance(result, str):
+            try:
+                parsed = json.loads(result)
+                if "choices" in parsed:
+                    return parsed["choices"][0]["messages"].strip()
+                return result.strip()
+            except Exception:
+                return result.strip()
+        return str(result).strip()
+    finally:
+        cur.close()
+        conn.close()
 
 @app.post("/onboard")
 async def onboard_user(data: List[Dict[str, str]]):
-    """
-    Expects array of chat messages: [{"role": "user", "content": "..."}, ...]
-    """
-    chat_history = data
-    
-    formatted_messages = []
-    for msg in chat_history:
-        role = "user" if msg["role"] == "user" else "model"
-        formatted_messages.append({"role": role, "parts": [msg["content"]]})
-
     try:
-        response = onboard_model.generate_content(formatted_messages)
-        response_text = response.text
+        response_text = cortex_complete_chat(data, system=ONBOARD_PROMPT)
         json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-        
         if json_match:
             raw_json = json.loads(json_match.group())
-            
-            # Return partial profile - metrics will be added later
             return {
-                "status": "needs_metrics", 
+                "status": "needs_metrics",
                 "partial_data": raw_json,
-                "message": "Great! Now we need some metrics to personalize your experience."
+                "message": "Great! Now let's grab a few measurements.",
             }
-
         return {"status": "chatting", "message": response_text}
-
     except Exception as e:
-        print(f"ERROR: {str(e)}")
         return {"status": "error", "message": f"Server Error: {str(e)}"}
-
 
 @app.post("/complete_profile")
 async def complete_profile(profile_data: dict):
-    """
-    Receives complete profile with metrics and calculates fitness score
-    """
     try:
-        # Extract data
+        # ALWAYS generate a new unique user_id, don't trust frontend
+        user_id = "user_" + uuid.uuid4().hex[:8]
+        profile_data["user_id"] = user_id
+        
+        print(f"[DEBUG] Creating profile with user_id: {user_id}")
+
         age = float(profile_data.get("age", 0))
         weight = float(profile_data.get("weight_kg", 0))
         height_cm = float(profile_data.get("height_cm", 0))
         resting_bpm = float(profile_data.get("resting_bpm", 0))
         workout_freq = float(profile_data.get("workouts_per_week", 0))
-        
-        # Feature Engineering
+
         height_m = height_cm / 100
         bmi = weight / (height_m ** 2) if height_m > 0 else 0
         max_bpm = 220 - age
-        
-        # Arrange features matching training order
-        input_features = np.array([[age, weight, height_m, resting_bpm, max_bpm, workout_freq, bmi]])
-        
-        # Scale and Predict
-        scaled_input = fit_scaler.transform(input_features)
-        fitness_proba = fit_model.predict_proba(scaled_input)[0][1]
-        
-        # Predict experience level (1-3)
-        experience_prediction = fit_model.predict(scaled_input)[0]
-        experience_level = int(experience_prediction) + 1  # Convert 0/1 to 1/2/3
-        
+
+        feats = np.array([[age, weight, height_m, resting_bpm, max_bpm, workout_freq, bmi]])
+        scaled = fit_scaler.transform(feats)
+        fitness_proba = fit_model.predict_proba(scaled)[0][1]
+        exp_level = int(fit_model.predict(scaled)[0]) + 1
+
         profile_data["fitness_score"] = round(float(fitness_proba), 2)
-        profile_data["experience_level"] = experience_level
-        
-        # Create profile
+        profile_data["experience_level"] = exp_level
+
         profile = UserProfile(**profile_data)
         
-        # Save to Snowflake
-        conn = connect(**SNOWFLAKE_CONFIG)
+        conn = _get_conn()
         cur = conn.cursor()
         try:
             query = """
             INSERT INTO USER_PROFILES (
-                USER_ID, GOALS, WORKOUTS_PER_WEEK, AI_EXTRACTED_DATA, 
-                FITNESS_SCORE, WEIGHT_KG, HEIGHT_CM, AGE, 
+                USER_ID, GOALS, WORKOUTS_PER_WEEK, AI_EXTRACTED_DATA,
+                FITNESS_SCORE, WEIGHT_KG, HEIGHT_CM, AGE,
                 RESTING_BPM, EXPERIENCE_LEVEL, CREATED_AT, BROAD_GOAL
-            )
-            VALUES (%s, PARSE_JSON(%s), %s, PARSE_JSON(%s), %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s)
+            ) 
+            SELECT 
+                %s, TRY_PARSE_JSON(%s), %s, TRY_PARSE_JSON(%s), 
+                %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP(), %s
             """
-            cur.execute(query, (
-                profile.user_id,
-                json.dumps(profile.goals),
-                profile.workouts_per_week,
-                json.dumps(profile.ai_extracted_data),
-                profile.fitness_score,
-                profile.weight_kg,
-                profile.height_cm,
-                profile.age,
-                profile.resting_bpm,
-                profile.experience_level,
-                profile.broad_goal
-            ))
+            cur.execute(query, profile.to_snowflake_query())
             conn.commit()
+            print(f"[DEBUG] Profile saved successfully for {user_id}")
         finally:
             cur.close()
             conn.close()
-            
+
         return {"status": "complete", "data": profile.dict()}
-
     except Exception as e:
-        print(f"ERROR: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        print(f"[ERROR] Profile creation failed: {str(e)}")
         return {"status": "error", "message": f"Server Error: {str(e)}"}
-
-# --- JOURNALING ENDPOINT ---
 
 @app.post("/journal")
 async def process_journal(user_id: str, entry_text: str):
-    raw_response = journal_model.generate_content(f"{JOURNAL_INPUT_PROMPT}\n\nEntry: {entry_text}")
-    json_match = re.search(r'\{.*\}', raw_response.text, re.DOTALL)
-    
-    if not json_match: raise HTTPException(status_code=500, detail="Parsing Error")
-    cleaned_data = json.loads(json_match.group())
-
-    conn = connect(**SNOWFLAKE_CONFIG)
+    conn = _get_conn()
     cur = conn.cursor()
     try:
-        # First, get sentiment score
+        clean_prompt = f"{JOURNAL_INPUT_PROMPT}\n\nEntry: {entry_text}"
+        clean_response = cortex_complete(clean_prompt, temperature=0.2)
+        json_match = re.search(r'\{.*\}', clean_response, re.DOTALL)
+        
+        if not json_match:
+            raise HTTPException(status_code=500, detail="Journal parsing error")
+        cleaned_data = json.loads(json_match.group())
+
         cur.execute("SELECT SNOWFLAKE.CORTEX.SENTIMENT(%s)", (cleaned_data["cleaned_text"],))
         sentiment_score = cur.fetchone()[0]
-        
-        # Insert journal entry
+
         cur.execute(
             "INSERT INTO USER_JOURNALS (USER_ID, JOURNAL, SENTIMENT_ANALYSIS, CREATED_AT) VALUES (%s, %s, %s, CURRENT_TIMESTAMP())",
-            (user_id, cleaned_data["cleaned_text"], sentiment_score)
+            (user_id, cleaned_data["cleaned_text"], sentiment_score),
         )
         conn.commit()
 
-        # Get user goals
         cur.execute("SELECT GOALS FROM USER_PROFILES WHERE USER_ID = %s", (user_id,))
         row = cur.fetchone()
-        user_interests = row[0] if row else "General fitness"
+        user_interests = str(row[0]) if row else "General fitness"
 
-        final_prompt = JOURNAL_OUTPUT_PROMPT.format(
+        obs_prompt = JOURNAL_OUTPUT_PROMPT.format(
             cleaned_text=cleaned_data["cleaned_text"],
             cortex_score=sentiment_score,
-            user_goals_and_activities=user_interests
+            user_goals_and_activities=user_interests,
         )
-        analysis_response = journal_model.generate_content(final_prompt)
-        conn.commit()
-        
+        observation = cortex_complete(obs_prompt, temperature=0.5)
+
         return {
             "score": sentiment_score,
-            "observation": analysis_response.text,
+            "observation": observation,
             "tags": cleaned_data["context_tags"],
-            "safety_flag": cleaned_data["safety_flag"]
+            "safety_flag": cleaned_data["safety_flag"],
         }
     finally:
         cur.close()
         conn.close()
 
-# --- SCHEDULE GENERATION ENDPOINT ---
+# --- ADDED ENDPOINTS FOR DASHBOARD ---
 
-@app.post("/generate-schedule")
-async def generate_schedule(user_id: str):
-    conn = connect(**SNOWFLAKE_CONFIG)
+@app.get("/journal_history/{user_id}")
+async def get_journal_history(user_id: str):
+    conn = _get_conn()
     cur = conn.cursor()
     try:
-        cur.execute("SELECT BROAD_GOAL, FITNESS_SCORE, AI_EXTRACTED_DATA FROM USER_PROFILES WHERE USER_ID = %s", (user_id,))
-        row = cur.fetchone()
-        if not row: raise HTTPException(status_code=404, detail="Not Found")
-            
-        broad_goal, fitness_score, extracted_data = row
-        availability = extracted_data.get('schedule', '3 days a week')
+        cur.execute("""
+            SELECT TO_CHAR(CREATED_AT, 'Dy') as day, 
+                   CAST(SENTIMENT_ANALYSIS AS FLOAT) as sentiment
+            FROM USER_JOURNALS 
+            WHERE USER_ID = %s 
+            ORDER BY CREATED_AT DESC LIMIT 7
+        """, (user_id,))
+        rows = cur.fetchall()
+        # Convert to format React Chart expects
+        history = [{"day": r[0], "sentiment": r[1]} for r in rows]
+        return {"history": list(reversed(history))}
+    finally:
+        cur.close()
+        conn.close()
 
-        prompt = SCHEDULE_GENERATOR_PROMPT.format(
-            fitness_score=fitness_score,
-            broad_goal=broad_goal,
-            availability=availability
-        )
+@app.get("/workout_stats/{user_id}")
+async def get_workout_stats(user_id: str):
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT WORKOUTS_PER_WEEK FROM USER_PROFILES WHERE USER_ID = %s", (user_id,))
+        row = cur.fetchone()
+        goal = row[0] if row else 0
         
-        response = journal_model.generate_content(prompt)
-        json_match = re.search(r'\[.*\]', response.text, re.DOTALL)
+        # TODO: In a real app, track actual completed workouts from a WORKOUTS table
+        # For now, return 0 completed with calculated fields
+        completed = 0
+        percentage = 0 if goal == 0 else int((completed / goal) * 100)
+        remaining = max(0, goal - completed)
         
-        if json_match:
-            return {"user_id": user_id, "weekly_plan": json.loads(json_match.group())}
+        return {
+            "completed": completed,
+            "goal": goal,
+            "percentage": percentage,
+            "remaining": remaining
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+@app.get("/profile/{user_id}")
+async def get_profile(user_id: str):
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT AGE, HEIGHT_CM, WEIGHT_KG, RESTING_BPM, FITNESS_SCORE, BROAD_GOAL
+            FROM USER_PROFILES WHERE USER_ID = %s
+        """, (user_id,))
+        r = cur.fetchone()
         
-        return {"error": "Invalid AI JSON"}
+        if not r:
+            return {"error": "Not found"}
+
+        # Calculate BMI from the data
+        age = r[0]
+        height_cm = r[1]
+        weight_kg = r[2]
+        resting_bpm = r[3]
+        fitness_score = r[4]
+        broad_goal = r[5]
+        
+        height_m = height_cm / 100
+        bmi = round(weight_kg / (height_m ** 2), 1) if height_m > 0 else 0
+
+        # Construct the response to match the 'profileData' state in React
+        return {
+            "user_id": user_id,
+            "age": age,
+            "height_cm": height_cm,
+            "weight_kg": weight_kg,
+            "resting_bpm": resting_bpm,
+            "fitness_score": fitness_score,
+            "broad_goal": broad_goal,
+            "bmi": bmi  # Add calculated BMI
+        }
+    finally:
+        cur.close()
+        conn.close()
+
+@app.patch("/profile/{user_id}")
+async def update_profile(user_id: str, updates: dict):
+    """Update user profile metrics and recalculate fitness score"""
+    conn = _get_conn()
+    cur = conn.cursor()
+    try:
+        # Extract the new values
+        age = float(updates.get("age"))
+        weight = float(updates.get("weight_kg"))
+        height_cm = float(updates.get("height_cm"))
+        resting_bpm = float(updates.get("resting_bpm"))
+        
+        # Recalculate fitness score
+        height_m = height_cm / 100
+        bmi = weight / (height_m ** 2) if height_m > 0 else 0
+        max_bpm = 220 - age
+        
+        # Get workouts_per_week from existing profile
+        cur.execute("SELECT WORKOUTS_PER_WEEK FROM USER_PROFILES WHERE USER_ID = %s", (user_id,))
+        row = cur.fetchone()
+        workout_freq = float(row[0]) if row else 3.0
+        
+        # Recalculate fitness score using model
+        feats = np.array([[age, weight, height_m, resting_bpm, max_bpm, workout_freq, bmi]])
+        scaled = fit_scaler.transform(feats)
+        fitness_proba = fit_model.predict_proba(scaled)[0][1]
+        exp_level = int(fit_model.predict(scaled)[0]) + 1
+        
+        fitness_score = round(float(fitness_proba), 2)
+        
+        # Update the database
+        cur.execute("""
+            UPDATE USER_PROFILES 
+            SET AGE = %s, 
+                HEIGHT_CM = %s, 
+                WEIGHT_KG = %s, 
+                RESTING_BPM = %s,
+                FITNESS_SCORE = %s,
+                EXPERIENCE_LEVEL = %s
+            WHERE USER_ID = %s
+        """, (age, height_cm, weight, resting_bpm, fitness_score, exp_level, user_id))
+        conn.commit()
+        
+        return {
+            "status": "updated",
+            "user_id": user_id,
+            "age": age,
+            "height_cm": height_cm,
+            "weight_kg": weight,
+            "resting_bpm": resting_bpm,
+            "fitness_score": fitness_score,
+            "experience_level": exp_level
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
     finally:
         cur.close()
         conn.close()
 
 @app.get("/health")
 async def health_check():
-    return {"status": "alive"}
-
-@app.get("/profile/{user_id}")
-async def get_user_profile(user_id: str):
-    conn = connect(**SNOWFLAKE_CONFIG)
-    cur = conn.cursor()
-    
-    try:
-        # Calculate BMI and Max BPM directly in SQL for efficiency
-        query = """
-        SELECT 
-            USER_ID, 
-            AGE, 
-            HEIGHT_CM, 
-            WEIGHT_KG, 
-            RESTING_BPM,
-            -- BMI Formula: kg / (m^2)
-            ROUND(WEIGHT_KG / SQUARE(HEIGHT_CM / 100), 1) as BMI,
-            -- Max BPM Formula: 220 - Age
-            (220 - AGE) as MAX_BPM
-        FROM USER_PROFILES 
-        WHERE USER_ID = %s
-        """
-        cur.execute(query, (user_id,))
-        row = cur.fetchone()
-        
-        if not row:
-            raise HTTPException(status_code=404, detail="User profile not found")
-            
-        return {
-            "user_id": row[0],
-            "age": row[1],
-            "height_cm": row[2],
-            "weight_kg": row[3],
-            "resting_bpm": row[4],
-            "bmi": row[5],
-            "max_bpm": row[6]
-        }
-    finally:
-        cur.close()
-        conn.close()
+    return {"status": "alive", "engine": f"Snowflake Cortex ({CORTEX_MODEL})"}

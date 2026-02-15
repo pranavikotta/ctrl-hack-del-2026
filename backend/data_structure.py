@@ -18,17 +18,17 @@ class UserProfile(BaseModel):
 
     def to_snowflake_query(self):
         return (
-            self.user_id,
-            json.dumps(self.goals),
-            self.workouts_per_week,
-            json.dumps(self.ai_extracted_data),
-            self.fitness_score,
-            self.broad_goal,
-            self.weight_kg,
-            self.height_cm,
-            self.age,
-            self.resting_bpm,
-            self.experience_level
+            self.user_id,             # %s 1
+            json.dumps(self.goals),   # %s 2
+            self.workouts_per_week,   # %s 3
+            json.dumps(self.ai_extracted_data), # %s 4
+            self.fitness_score,       # %s 5
+            self.weight_kg,           # %s 6
+            self.height_cm,           # %s 7
+            self.age,                 # %s 8
+            self.resting_bpm,         # %s 9
+            self.experience_level,    # %s 10
+            self.broad_goal           # %s 11
         )
 
 class UserJournal(BaseModel):
