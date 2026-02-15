@@ -22,8 +22,16 @@ Output ONLY the raw JSON object, no markdown, no backticks, no explanation.
   "broad_goal": "Building Muscle",
   "goals": ["bench press 225lbs", "build bigger arms"],
   "workouts_per_week": 3,
-  "ai_extracted_data": {"schedule": "Monday, Wednesday, Friday evenings", "injuries": "none"}
+  "ai_extracted_data": {"schedule": "Monday evening, Wednesday evening, Friday morning", "injuries": "none"}
 }
+
+SCHEDULE FORMAT RULES:
+- Use specific day names: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday
+- Add time: morning, afternoon, or evening after each day
+- Convert "weekends" to "Saturday morning, Sunday morning"
+- Convert "weekdays" to specific days (e.g., "Monday, Wednesday, Friday")
+- Format: "Day time, Day time" (comma-separated)
+
 Replace the example values with what the user actually told you.
 workouts_per_week must be an integer (e.g. 3), not a string.
 goals must be a JSON array of strings using double quotes.

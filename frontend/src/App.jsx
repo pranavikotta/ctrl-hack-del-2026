@@ -61,6 +61,19 @@ function App() {
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileEdits, setProfileEdits] = useState({});
 
+  // Schedule/Calendar state
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
+  const [calendarScroll, setCalendarScroll] = useState(0);
+  const [editingSchedule, setEditingSchedule] = useState({
+    Monday: { enabled: false, time: 'morning' },
+    Tuesday: { enabled: false, time: 'morning' },
+    Wednesday: { enabled: false, time: 'morning' },
+    Thursday: { enabled: false, time: 'morning' },
+    Friday: { enabled: false, time: 'morning' },
+    Saturday: { enabled: false, time: 'morning' },
+    Sunday: { enabled: false, time: 'morning' }
+  });
+
   // State for typing animation
   const [displayedText, setDisplayedText] = useState("");
   const [isTyping, setIsTyping] = useState(false);
@@ -68,6 +81,7 @@ function App() {
 
   // Auto-scroll to bottom of chat
   const chatEndRef = useRef(null);
+  const calendarBodyRef = useRef(null);
   
   const scrollToBottom = () => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -590,6 +604,9 @@ function App() {
 
   // --- RENDER: Dashboard ---
   if (currentPage === 'dashboard' && userProfile) {
+    // Parse schedule from userProfile
+    const schedule = userProfile?.ai_extracted_data?.schedule || '';
+    
     return (
       <div className="container">
         <div className="dashboard-container">
@@ -706,16 +723,14 @@ function App() {
                       // Determine block status
                       let blockStatus = 'none';
                       if (dayInSchedule && workoutStart !== -1) {
-                        if (isFuture) {
+                        if (sentiment !== null) {
+                          // Color based on journal sentiment
+                          if (sentiment >= 0.7) blockStatus = 'completed-high';
+                          else if (sentiment >= 0.5) blockStatus = 'completed-moderate';
+                          else blockStatus = 'completed-low';
+                        } else {
+                          // No journal yet - show as white/upcoming
                           blockStatus = 'upcoming';
-                        } else if (isPast || isToday) {
-                          if (sentiment !== null) {
-                            if (sentiment >= 0.7) blockStatus = 'completed-high';
-                            else if (sentiment >= 0.5) blockStatus = 'completed-moderate';
-                            else blockStatus = 'completed-low';
-                          } else {
-                            blockStatus = 'missed';
-                          }
                         }
                       }
 
@@ -865,7 +880,7 @@ function App() {
                 transform: 'translate(-50%, -50%)',
                 zIndex: 1000, width: '90%', maxWidth: '700px',
                 maxHeight: '85vh', overflowY: 'auto', padding: '40px',
-              } : { justifyContent: 'flex-start' }}
+              } : { justifyContent: 'flex-start', gridColumn: 'span 1' }}
             >
               {/* Backdrop */}
               {profileExpanded && (
@@ -1182,38 +1197,7 @@ function App() {
               </button>
             </div>
 
-            <div className="dashboard-card">
-              <div className="card-title">Journal Sentiment Trend</div>
-              <div className="card-content" style={{fontSize: '14px', marginBottom: '10px'}}>
-                Track your mental & physical recovery over the past week
-              </div>
-              <div className="simple-chart">
-                {journalHistory.map((entry, index) => {
-                  const height = `${entry.sentiment * 100}%`;
-                  let gradient;
-                  if (entry.sentiment >= 0.7) {
-                    gradient = 'linear-gradient(to top, #4caf50, #2e7d32)';
-                  } else if (entry.sentiment >= 0.5) {
-                    gradient = 'linear-gradient(to top, #ffc107, #ff9800)';
-                  } else {
-                    gradient = 'linear-gradient(to top, #ff9800, #f57c00)';
-                  }
-                  
-                  return (
-                    <div key={index} className="chart-bar" style={{height, background: gradient}}>
-                      <div className="chart-label">{entry.day}</div>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="chart-legend">
-                <span style={{color: '#4caf50'}}>● High Recovery</span>
-                <span style={{color: '#ffc107', marginLeft: '15px'}}>● Moderate</span>
-                <span style={{color: '#ff9800', marginLeft: '15px'}}>● Low/Stressed</span>
-              </div>
-            </div>
-
-            <div className="dashboard-card" style={{gridColumn: 'span 2'}}>
+            <div className="dashboard-card" style={{gridColumn: 'span 1'}}>
               <div className="card-title">Weekly Workout Progress</div>
               <div className="card-content">
                 <div style={{fontSize: '48px', fontWeight: '300', color: '#1565c0', margin: '20px 0'}}>
@@ -1233,16 +1217,6 @@ function App() {
                     ? `${workoutStats.remaining || 0} more ${workoutStats.remaining === 1 ? 'workout' : 'workouts'} to reach your weekly goal`
                     : '🎉 Weekly goal achieved!'}
                 </div>
-              </div>
-            </div>
-
-            <div className="dashboard-card" style={{gridColumn: 'span 2'}}>
-              <div className="card-title">Journal Summary</div>
-              <div className="card-content">
-                <p>Track your workouts and mental state to get personalized insights.</p>
-                <p style={{fontSize: '14px', marginTop: '10px', opacity: 0.7}}>
-                  Recent entries will appear here once you start journaling.
-                </p>
               </div>
             </div>
           </div>

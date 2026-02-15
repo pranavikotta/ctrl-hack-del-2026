@@ -4,6 +4,7 @@ import json
 import uuid
 import joblib
 import numpy as np
+import pandas as pd
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -147,12 +148,22 @@ async def complete_profile(profile_data: dict):
         bmi = weight / (height_m ** 2) if height_m > 0 else 0
         max_bpm = 220 - age
 
-        feats = np.array([[age, weight, height_m, resting_bpm, max_bpm, workout_freq, bmi]])
+        feats = pd.DataFrame([[age, weight, height_m, resting_bpm, max_bpm, workout_freq, bmi]], 
+            columns=['Age', 'Weight (kg)', 'Height (m)', 'Resting_BPM', 'Max_BPM', 'Workout_Frequency (days/week)', 'BMI'])
         scaled = fit_scaler.transform(feats)
         fitness_proba = fit_model.predict_proba(scaled)[0][1]
         exp_level = int(fit_model.predict(scaled)[0]) + 1
 
-        profile_data["fitness_score"] = round(float(fitness_proba), 2)
+        # Hybrid scoring: combine ML model with vital sign bonuses
+        fitness_score = round(float(fitness_proba), 2)
+        if resting_bpm < 60:  # Athletic level
+            fitness_score = min(1.0, fitness_score + 0.3)
+            print(f"[DEBUG] Added athletic BPM bonus: {resting_bpm} < 60")
+        elif resting_bpm < 70:  # Good
+            fitness_score = min(1.0, fitness_score + 0.15)
+            print(f"[DEBUG] Added good BPM bonus: {resting_bpm} < 70")
+
+        profile_data["fitness_score"] = fitness_score
         profile_data["experience_level"] = exp_level
 
         profile = UserProfile(**profile_data)
@@ -335,7 +346,8 @@ async def update_profile(user_id: str, updates: dict):
         workout_freq = float(row[0]) if row else 3.0
         
         # Recalculate fitness score using model
-        feats = np.array([[age, weight, height_m, resting_bpm, max_bpm, workout_freq, bmi]])
+        feats = pd.DataFrame([[age, weight, height_m, resting_bpm, max_bpm, workout_freq, bmi]], 
+                            columns=['Age', 'Weight (kg)', 'Height (m)', 'Resting_BPM', 'Max_BPM', 'Workout_Frequency (days/week)', 'BMI'])
         scaled = fit_scaler.transform(feats)
         fitness_proba = fit_model.predict_proba(scaled)[0][1]
         exp_level = int(fit_model.predict(scaled)[0]) + 1
@@ -370,6 +382,110 @@ async def update_profile(user_id: str, updates: dict):
     finally:
         cur.close()
         conn.close()
+
+@app.post("/update_schedule")
+async def update_schedule(data: dict):
+    """Update user's workout schedule"""
+    try:
+        user_id = data.get("user_id")
+        schedule = data.get("schedule", "")
+        workouts_per_week = data.get("workouts_per_week", 0)
+        
+        if not user_id:
+            return {"status": "error", "message": "user_id required"}
+        
+        conn = _get_conn()
+        cur = conn.cursor()
+        try:
+            # Update AI_EXTRACTED_DATA with new schedule
+            cur.execute("""
+                SELECT AI_EXTRACTED_DATA FROM USER_PROFILES WHERE USER_ID = %s
+            """, (user_id,))
+            row = cur.fetchone()
+            
+            if not row:
+                return {"status": "error", "message": "User not found"}
+            
+            # Parse existing AI_EXTRACTED_DATA
+            ai_data = json.loads(row[0]) if row[0] else {}
+            ai_data['schedule'] = schedule
+            
+            # Update the profile
+            cur.execute("""
+                UPDATE USER_PROFILES
+                SET AI_EXTRACTED_DATA = PARSE_JSON(%s),
+                    WORKOUTS_PER_WEEK = %s
+                WHERE USER_ID = %s
+            """, (json.dumps(ai_data), workouts_per_week, user_id))
+            conn.commit()
+            
+            print(f"[DEBUG] Schedule updated for {user_id}: {schedule}")
+            
+            return {
+                "status": "success",
+                "schedule": schedule,
+                "workouts_per_week": workouts_per_week
+            }
+        finally:
+            cur.close()
+            conn.close()
+    except Exception as e:
+        print(f"[ERROR] Schedule update failed: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+@app.post("/generate_schedule")
+async def generate_schedule(data: dict):
+    """Generate AI-powered workout schedule based on user profile"""
+    try:
+        user_id = data.get("user_id")
+        
+        if not user_id:
+            return {"status": "error", "message": "user_id required"}
+        
+        conn = _get_conn()
+        cur = conn.cursor()
+        try:
+            # Fetch user profile
+            cur.execute("""
+                SELECT FITNESS_SCORE, BROAD_GOAL, AI_EXTRACTED_DATA, WORKOUTS_PER_WEEK
+                FROM USER_PROFILES WHERE USER_ID = %s
+            """, (user_id,))
+            row = cur.fetchone()
+            
+            if not row:
+                return {"status": "error", "message": "User not found"}
+            
+            fitness_score = row[0]
+            broad_goal = row[1]
+            ai_data = json.loads(row[2]) if row[2] else {}
+            availability = ai_data.get('schedule', 'flexible schedule')
+            
+            # Generate schedule using AI
+            prompt = SCHEDULE_GENERATOR_PROMPT.format(
+                fitness_score=fitness_score,
+                broad_goal=broad_goal,
+                availability=availability
+            )
+            
+            schedule_response = cortex_complete(prompt, temperature=0.7)
+            
+            # Try to parse JSON response
+            json_match = re.search(r'\[.*\]', schedule_response, re.DOTALL)
+            if json_match:
+                schedule_data = json.loads(json_match.group())
+                return {
+                    "status": "success",
+                    "schedule": schedule_data
+                }
+            else:
+                return {"status": "error", "message": "Failed to generate schedule"}
+                
+        finally:
+            cur.close()
+            conn.close()
+    except Exception as e:
+        print(f"[ERROR] Schedule generation failed: {str(e)}")
+        return {"status": "error", "message": str(e)}
 
 @app.get("/health")
 async def health_check():
