@@ -18,6 +18,44 @@ body {
   min-height: 100vh;
 }
 
+/* Logo Styles - Fixed position, appears on all pages */
+.app-logo {
+  position: fixed;
+  top: -40px;
+  left: 0px;
+  z-index: 999;
+}
+
+.app-logo img {
+  height: 180px;
+  width: auto;
+  max-width: 350px;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 8px rgba(100, 181, 246, 0.3));
+}
+
+.app-logo img:hover {
+  transform: scale(1.05);
+}
+
+/* Responsive logo size */
+@media (max-width: 768px) {
+  .app-logo {
+    top: 15px;
+    left: 15px;
+  }
+  
+  .app-logo img {
+    height: 45px;
+  }
+}
+
+@media (max-width: 480px) {
+  .app-logo img {
+    height: 35px;
+  }
+}
+
 .container {
   width: 100%;
   min-height: 100vh;
